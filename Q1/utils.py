@@ -1,30 +1,18 @@
-"""
-utils_final.py – solver for the linearised potential-flow bump problem
-  (1 - M²) φ_xx + φ_yy = 0   on  [-q, s] × [0, r]
-
-Key improvements over the original:
-  • Red-black vectorised Gauss-Seidel & SOR  (≈50× faster than scalar loops)
-  • Canonical 2nd-order one-sided  compute_uv
-  • Convergence-rate estimate  (spectral radius from last two updates)
-"""
-
 import numpy as np
 from typing import List, Tuple, Dict, Any, Optional
 from time import perf_counter
 
-# ──────────────────────────────────────────────
 # Boundary conditions
-# ──────────────────────────────────────────────
 def dYb_dx(x: np.ndarray, eps: float) -> np.ndarray:
-    """dYb/dx = -2 eps x  for x in [-1,1], else 0."""
+    """dYb/dx = -2 eps x  for x in [-1,1], else 0"""
     g = np.zeros_like(x, dtype=float)
     mask = (x >= -1.0) & (x <= 1.0)
     g[mask] = -2.0 * eps * x[mask]
     return g
 
-
+# one sided fd instead of central
 def neumann_bcs(phi: np.ndarray, g_bottom: np.ndarray, dx: float, dy: float) -> None:
-    """Enforce Neumann BCs (2nd-order one-sided).
+    """Enforce Neumann BCs (2nd-order one-sided)
 
     bottom  y = 0 :  φ_y = g_bottom(x)
     top     y = r :  φ_y = 0
@@ -39,15 +27,12 @@ def neumann_bcs(phi: np.ndarray, g_bottom: np.ndarray, dx: float, dy: float) -> 
     phi[0, :]      = (4.0 * phi[1, :]      - phi[2, :])      / 3.0
     phi[Nx - 1, :] = (4.0 * phi[Nx - 2, :] - phi[Nx - 3, :]) / 3.0
 
-
+# controlling +c
 def fix_gauge(phi: np.ndarray, anchor: Tuple[int, int] = (0, 0)) -> None:
-    """Remove the null-space constant (pure Neumann)."""
     phi -= phi[anchor[0], anchor[1]]
 
 
-# ──────────────────────────────────────────────
 # Iteration steps
-# ──────────────────────────────────────────────
 def step_jacobi(phi: np.ndarray, lam: float) -> np.ndarray:
     """Jacobi update (fully vectorised, returns new array)."""
     phi_new = phi.copy()
@@ -57,9 +42,9 @@ def step_jacobi(phi: np.ndarray, lam: float) -> np.ndarray:
     ) / (2.0 * (1.0 + lam))
     return phi_new
 
-
+# mask grid like checkerboard
 def _rb_masks(Nx: int, Ny: int):
-    """Pre-compute red / black boolean masks for the interior."""
+    """Pre-compute red / black boolean masks for the interior for sor/gs"""
     ii, jj = np.ogrid[1:Nx-1, 1:Ny-1]
     red  = ((ii + jj) % 2 == 0)
     black = ~red
@@ -67,14 +52,14 @@ def _rb_masks(Nx: int, Ny: int):
 
 
 def step_gs_rb(phi: np.ndarray, lam: float, red: np.ndarray, black: np.ndarray) -> None:
-    """Red-black Gauss-Seidel (in-place, vectorised)."""
+    """Red-black Gauss-Seidel"""
     denom = 2.0 * (1.0 + lam)
     inn = phi[1:-1, 1:-1]
-    # --- red sweep (neighbours are all black → still old) ---
+    # red sweep (neighbours are all black → still old)
     rhs = (lam * (phi[2:, 1:-1] + phi[:-2, 1:-1])
            + (phi[1:-1, 2:] + phi[1:-1, :-2]))
     inn[red] = (rhs / denom)[red]
-    # --- black sweep (neighbours include just-updated reds) ---
+    # black sweep (neighbours include just-updated reds)
     rhs = (lam * (phi[2:, 1:-1] + phi[:-2, 1:-1])
            + (phi[1:-1, 2:] + phi[1:-1, :-2]))
     inn[black] = (rhs / denom)[black]
@@ -82,7 +67,7 @@ def step_gs_rb(phi: np.ndarray, lam: float, red: np.ndarray, black: np.ndarray) 
 
 def step_sor_rb(phi: np.ndarray, lam: float, omega: float,
                 red: np.ndarray, black: np.ndarray) -> None:
-    """Red-black SOR (in-place, vectorised)."""
+    """Red-black SOR"""
     denom = 2.0 * (1.0 + lam)
     inn = phi[1:-1, 1:-1]
     for mask in (red, black):
@@ -92,11 +77,9 @@ def step_sor_rb(phi: np.ndarray, lam: float, omega: float,
         inn[mask] = ((1.0 - omega) * inn + omega * phi_gs)[mask]
 
 
-# ──────────────────────────────────────────────
 # Convergence helpers
-# ──────────────────────────────────────────────
 def residual_interior(phi: np.ndarray, M: float, dx: float, dy: float) -> float:
-    """‖(1-M²)φ_xx + φ_yy‖_∞ on interior nodes."""
+    """‖(1-M^2)phi_xx + phi_yy‖_inf on interior nodes."""
     coeff = 1.0 - M * M
     inner = phi[1:-1, 1:-1]
     phi_xx = (phi[2:, 1:-1] - 2.0 * inner + phi[:-2, 1:-1]) / (dx * dx)
@@ -105,12 +88,12 @@ def residual_interior(phi: np.ndarray, M: float, dx: float, dy: float) -> float:
 
 
 def phi_update_size(phi_old: np.ndarray, phi_new: np.ndarray) -> float:
-    """‖φ_new − φ_old‖_∞ on the interior."""
+    """‖φ_new - φ_old‖_inf on the interior."""
     return float(np.max(np.abs((phi_new - phi_old)[1:-1, 1:-1])))
 
 
 def Usurf_on_y0(phi: np.ndarray, dx: float) -> np.ndarray:
-    """U_surf = φ_x along y = 0 (central interior, one-sided at edges)."""
+    """U_surf = phi_x along y = 0 (central interior, one-sided at edges)."""
     u = np.zeros(phi.shape[0], dtype=float)
     u[1:-1] = (phi[2:, 0] - phi[:-2, 0]) / (2.0 * dx)
     u[0]    = (-3*phi[0, 0] + 4*phi[1, 0] - phi[2, 0]) / (2.0 * dx)
@@ -119,7 +102,7 @@ def Usurf_on_y0(phi: np.ndarray, dx: float) -> np.ndarray:
 
 
 def compute_uv(phi: np.ndarray, dx: float, dy: float) -> Tuple[np.ndarray, np.ndarray]:
-    """u = φ_x, v = φ_y  (central interior, 2nd-order one-sided at boundaries)."""
+    """u = phi_x, v = phi_y  (central interior, 2nd-order one-sided at boundaries)."""
     u = np.zeros_like(phi)
     v = np.zeros_like(phi)
     # interior
@@ -134,32 +117,28 @@ def compute_uv(phi: np.ndarray, dx: float, dy: float) -> Tuple[np.ndarray, np.nd
     return u, v
 
 
-# ──────────────────────────────────────────────
 # Theory helpers (SOR)
-# ──────────────────────────────────────────────
 def omega_opt_theory(Nx: int, Ny: int) -> float:
-    """Theoretical ω_opt for Poisson on an Nx × Ny grid (Dirichlet model).
+    """Theoretical w_opt for Poisson on an Nx x Ny grid (Dirichlet model).
 
-    ρ_J = ½[cos(π/(Nx-1)) + cos(π/(Ny-1))]  (for anisotropic grids keep both)
-    ω_opt = 2 / (1 + √(1 − ρ_J²))
+    rho_J = 1/2[cos(pi/(Nx-1)) + cos(pi/(Ny-1))]  (for anisotropic grids keep both)
+    w_opt = 2 / (1 + sqrt(1 - rho_J²))
     """
     rhoJ = 0.5 * (np.cos(np.pi / (Nx - 1)) + np.cos(np.pi / (Ny - 1)))
     return 2.0 / (1.0 + np.sqrt(1.0 - rhoJ * rhoJ))
 
 
 def rho_sor_theory(omega: float, Nx: int, Ny: int) -> float:
-    """Theoretical spectral radius ρ(L_ω) for SOR / Poisson."""
+    """Theoretical spectral radius rho(L_w) for SOR / Poisson."""
     rhoJ = 0.5 * (np.cos(np.pi / (Nx - 1)) + np.cos(np.pi / (Ny - 1)))
     w_opt = 2.0 / (1.0 + np.sqrt(1.0 - rhoJ * rhoJ))
     if omega < w_opt:
-        return omega - 1.0                     # |ω − 1| for under-relaxation branch
+        return omega - 1.0
     else:
-        return omega - 1.0                     # simplified; exact: (ω−1)
+        return omega - 1.0
 
 
-# ──────────────────────────────────────────────
-# Main solver
-# ──────────────────────────────────────────────
+# Main solver with info returns
 def solve_potential(
     eps: float,
     M: float,
@@ -190,7 +169,7 @@ def solve_potential(
     dx = float(x[1] - x[0])
     dy = float(y[1] - y[0])
 
-    lam = (1.0 - M**2) * (dy / dx) ** 2        # pre-compute once
+    lam = (1.0 - M**2) * (dy / dx) ** 2
 
     g_bottom = dYb_dx(x, eps)
     phi = np.zeros((Nx, Ny), dtype=float)
@@ -200,7 +179,7 @@ def solve_potential(
     res0 = residual_interior(phi, M, dx, dy)
     t0 = perf_counter()
 
-    # Pre-compute red-black masks (for GS / SOR)
+    # Pre-compute red-black masks (for GS / SOR) for faster computation
     red, black = _rb_masks(Nx, Ny)
 
     hist: List[Dict[str, float]] = []
@@ -232,7 +211,7 @@ def solve_potential(
         else:
             raise ValueError(f"Unknown method '{method}'. Choose 'jacobi', 'gs', 'sor'.")
 
-        # ---- convergence checks ----
+        # convergence checks
         do_check = (it % check_every == 0) or (it == 1)
         do_usurf = use_usurf_stop and ((it % usurf_every == 0) or (it == 1))
 
@@ -251,10 +230,9 @@ def solve_potential(
             rel_res = res / (res0 + 1e-14)
             elapsed = perf_counter() - t0
 
-            # spectral radius estimate  ρ ≈ upd_new / upd_old
+            # spectral radius estimate
             rho_est = float("nan")
             if prev_upd is not None and prev_upd > 1e-14 and upd > 1e-14:
-                # account for the number of iterations between checks
                 rho_est = (upd / prev_upd) ** (1.0 / check_every)
 
             row: Dict[str, float] = {
